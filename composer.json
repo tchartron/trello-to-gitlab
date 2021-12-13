@@ -1,0 +1,15 @@
+{
+    "name": "tchartron/trello-to-gitlab",
+    "description": "Import trello cards from a specific list on a board to gitlab issues",
+    "type": "cli",
+    "require": {
+        "guzzlehttp/guzzle": "^7.3",
+        "league/climate": "^3.7"
+    },
+    "authors": [
+        {
+            "name": "Thomas Chartron",
+            "email": "contact@tchartron.com"
+        }
+    ]
+}

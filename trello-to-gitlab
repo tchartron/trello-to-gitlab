@@ -1,0 +1,179 @@
+#!/usr/bin/env php
+<?php
+
+use GuzzleHttp\Client;
+
+require_once(__DIR__.'/vendor/autoload.php');
+
+if (php_sapi_name() !== 'cli') {
+    die('Should be used in cli');
+}
+error_reporting(E_ERROR | E_PARSE);
+
+const TRELLO_BOARD_ID = "xxxxxxxxxxxxxxxxxxxxxxxxxxx";
+const TRELLO_LIST_ID = "xxxxxxxxxxxxxxxxxxxxxxxxxxx"; // To find this just go to your trello board select a card on the list you want and add '.json' to the url, you'll see the list id in the json
+const TRELLO_API_KEY = "662xxxxxxxxxxxxxxxxxxxxxx"; // This is your trello api key see https://trello.com/app-key
+const TRELLO_API_TOKEN = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // This is your trello api token see https://trello.com/app-key
+const GITLAB_API_TOKEN = "XXXXXXXXXXXXXXX"; // This is your gitlab access token it should have 'api' scope (maybe 'read_api' is enough did not test)
+const GITLAB_GROUP_ID = 11111111; //This is your gitlab.com group id visible on the group page (under the group name)
+const GITLAB_PROJECT_MAPPING = [
+    '12345678' => 'firstproject/front',
+    '23456789' => 'firstproject/back',
+    '34567890' => 'secondproject',
+];
+
+$climate = new League\CLImate\CLImate;
+
+$climate->arguments->add([
+    'help' => [
+        'prefix'  => 'h',
+        'longPrefix'  => 'help',
+        'description' => 'Prints a usage statement',
+        'noValue'     => true,
+    ],
+    'sprint_name' => [
+        'description' => "Sprint name used to retrieve board",
+    ],
+]);
+$climate->arguments->parse();
+
+if ($climate->arguments->defined('help')) {
+    $climate->green()->usage();
+    die();
+}
+
+$trello_endpoint = "https://api.trello.com/1/";
+$trello_client = new Client([
+    'base_uri' => $trello_endpoint,
+    'timeout'  => 2.0,
+    // 'debug' => true
+]);
+$gitlab_endpoint = "https://www.gitlab.com/api/v4/";
+$gitlab_client = new Client([
+    'base_uri' => $gitlab_endpoint,
+    'timeout'  => 2.0,
+    // 'debug' => true
+]);
+
+$trello_cards = getTrelloCardsFromList($trello_client, TRELLO_LIST_ID);
+
+$trello_weight_values = trelloCustomFieldValues($trello_client, TRELLO_BOARD_ID, 'poids');
+
+// var_dump($trello_weight_values);die();
+$total_cards = count($trello_cards);
+
+$input = $climate->green()->confirm(sprintf("Found %s cards to import continue ?", $total_cards));
+
+if ($input->confirmed()) {
+    $input = $climate->green()->input("Please enter milestone name :");
+    $milestone_name = $input->prompt();
+    $milestone_data = getGitlabOpenMilestone($gitlab_client, $milestone_name);
+    $milestone_id = $milestone_data[0]['id'];
+    // var_dump($milestone_id);die();
+    if (is_array($trello_cards) && !empty($trello_cards)) {
+        foreach ($trello_cards as $card) {
+            $input = $climate->green()->radio(sprintf("Select project for issue : <blue>%s</blue>", $card['name']), GITLAB_PROJECT_MAPPING);
+            $project_id = (int)array_search($input->prompt(), GITLAB_PROJECT_MAPPING);
+
+            $climate->blue()->out(sprintf("Creating issue : %s", $card['name']));
+            createGitlabIssueFromTrelloCard($gitlab_client, $card, $milestone_id, $project_id, $trello_weight_values);
+        }
+    } else {
+        $climate->red()->out("Format error");
+    }
+} else {
+    $climate->red()->out("Aborted import");
+    exit(0);
+}
+
+function getTrelloCardsFromList(object $client, string $trello_list_id) : array
+{
+    $trello_response = $client->request('GET', sprintf("lists/%s/cards?customFieldItems=true&attachments=true&key=%s&token=%s", $trello_list_id, TRELLO_API_KEY, TRELLO_API_TOKEN)
+    );
+    return json_decode($trello_response->getBody(), true);
+}
+
+function createGitlabIssueFromTrelloCard(object $client, array $card, int $milestone_id, int $project_id, array $trello_weight_values) : void
+{
+    if (is_array($card) && !empty($card)) {
+        $attachments_url = "";
+        if (isset($card['attachments']) && !empty($card['attachments'])) {
+            foreach ($card['attachments'] as $attachment) {
+                $attachments_url .= sprintf("%s\r\n", $attachment['url']);
+            }
+        }
+        if ($attachments_url !== "") {
+            $description = sprintf("%s\r\n\r\nPJ :\r\n%s\r\nCarte Trello :\r\n%s", $card['desc'], $attachments_url, $card['url']);
+        } else {
+            $description = sprintf("%s\r\n\r\nCarte Trello :\r\n%s", $card['desc'], $card['url']);
+        }
+        $gitlab_response = $client->request('POST', sprintf('projects/%d/issues', $project_id),
+            [
+                'headers' => [
+                    'private-token' => GITLAB_API_TOKEN
+                ],
+                'form_params' => [
+                    'title' => $card['name'],
+                    'description' => $description,
+                    'weight' => getCardWeight($card['customFieldItems'], $trello_weight_values),
+                    'milestone_id' => $milestone_id,
+                ]
+            ]
+        );
+        $created_issue = json_decode($gitlab_response->getBody(), true);
+        // var_dump('DONE');die();
+    }
+}
+
+function trelloCustomFieldValues(object $client, string $trello_board_id, string $custom_field_name) :array
+{
+    $result = [];
+    $trello_response = $client->request('GET', sprintf("boards/%s/customFields?key=%s&token=%s", $trello_board_id, TRELLO_API_KEY, TRELLO_API_TOKEN)
+    );
+    $response = json_decode($trello_response->getBody(), true);
+    if (is_array($response) && !empty($response)) {
+        foreach ($response as $res) {
+            if (strtolower($res['name']) === $custom_field_name) {
+                if (is_array($res['options']) && !empty($res['options'])) {
+                    foreach ($res['options'] as $opt) {
+                        // var_dump($opt['value']['text']);die();
+                        $result[$opt['id']] = $opt['value']['text'];
+                    }
+                }
+            }
+        }
+    }
+    return $result;
+}
+
+function getCardWeight($card_custom_fields, $trello_weight_values) : int
+{
+    if (is_array($card_custom_fields) && !empty($card_custom_fields)) {
+        foreach ($card_custom_fields as $custom_field) {
+            // if ($custom_field['id'] === '5c40ef9dffb2508a025984a1') { //Poid custom field id
+            if (array_key_exists($custom_field['idValue'], $trello_weight_values)) {
+                return (int)$trello_weight_values[$custom_field['idValue']];
+            }
+            // }
+        }
+    }
+    return 0;
+}
+
+function getGitlabOpenMilestone(object $client, string $milestone_title) : array
+{
+    $gitlab_response = $client->request('GET', sprintf('groups/%d/milestones', GITLAB_GROUP_ID),
+        [
+            'headers' => [
+                'private-token' => GITLAB_API_TOKEN
+            ],
+            'query' => [
+                'state' => 'active',
+                'title' => $milestone_title
+            ]
+        ]
+    );
+    return json_decode($gitlab_response->getBody(), true);
+}
+
+exit(0);
